@@ -4,6 +4,9 @@
 # Copyright (c) 2023 naushir.
 #
 # Arducam libcamera-apps bug report generator.
+# MODIFIED: 
+# - To support both Bullseye (libcamera-still) and Bookworm (rpicam-still)
+# - To add a default 8-second timeout to the camera command to prevent hangs.
 #
 
 import argparse
@@ -12,6 +15,22 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+
+# --- Arducam Optimization: OS Detection ---
+def get_os_codename():
+    """
+    Parses /etc/os-release to find the VERSION_CODENAME.
+    This is the most reliable way to distinguish Bullseye from Bookworm.
+    """
+    try:
+        with open('/etc/os-release', 'r') as f:
+            for line in f:
+                if line.startswith('VERSION_CODENAME='):
+                    return line.strip().split('=')[1]
+    except FileNotFoundError:
+        print("Warning: /etc/os-release not found. Falling back to Bullseye defaults.", file=sys.stderr)
+        return 'bullseye'
+    return 'bullseye' # Default fallback
 
 
 class Report:
@@ -38,10 +57,8 @@ class Report:
 
     def exec(self):
         print(f'{"-"*80}\n{self._id}\n{"-"*80}', file=self._file)
-
         for c in self._cmds:
             self.__run_cmd(c)
-
         for s in self._strs:
             print(s, file=self._file)
 
@@ -55,46 +72,62 @@ def run_prog(cmd, t):
                              stderr=subprocess.STDOUT, errors='ignore')
         poll = select.poll()
         poll.register(p.stdout, select.POLLIN)
-
         while p.poll() is None:
             if poll.poll(0):
                 line = p.stdout.readline()
                 print(line, end='', flush=True)
                 out.append(line)
-
+            # This is the timeout logic, it will now trigger by default
             if (t != 0) and (time.time() - start > t):
                 p.kill()
                 out = out + p.communicate()[0].splitlines(keepends=True)
-                out.append('Error: ***** TIMEOUT *****')
+                out.append('\nError: ***** TIMEOUT after ' + str(t) + ' seconds *****\n')
                 break
-
     except KeyboardInterrupt:
         p.kill()
         out = out + p.communicate()[0].splitlines(keepends=True)
-        out.append('Error: ***** INTERRUPT *****')
-
+        out.append('\nError: ***** INTERRUPT *****\n')
     p.wait()
     return ''.join(out)
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='libcamera-apps Bug Report Generator')
+    parser = argparse.ArgumentParser(description='libcamera-apps Bug Report Generator')
     parser.add_argument('-o', help='Report filename',
                         type=str, default='arducam-bug-report.txt')
-    parser.add_argument('-t', help='Timeout (seconds) for the command to run. A value of 0 \
-                                    disables the timeout.', type=float, default=0)
-    parser.add_argument('-c', help='Command to run, e.g. -c "libcamera-still -t 5000 -n -o arducam-test.jpg"',
-                        type=str, default='libcamera-still -n -t 1000 -o arducam-test.jpg --width 1920 --height 1080')
+    
+    # --- (START) Arducam Optimization: Set default timeout ---
+    # Changed default from 0 to 8.0 to prevent camera hangs.
+    parser.add_argument('-t', help='Timeout (seconds) for the camera command. The script will terminate '
+                                    'the command if it runs longer than this. Default is 8 seconds. Set to 0 to disable.',
+                        type=float, default=8.0)
+    # --- (END) Arducam Optimization ---
+
+    parser.add_argument('-c', help='Command to run, e.g., -c "libcamera-still -t 5000 -n -o arducam-test.jpg"',
+                        type=str, default=None)
+    
     args = parser.parse_args()
 
+    os_codename = get_os_codename()
+
+    if args.c is None:
+        if os_codename == 'bookworm':
+            print("[INFO] Bookworm OS detected. Defaulting to 'rpicam-still'.")
+            # Note: The command's own timeout (-t 1000) is separate from the script's watchdog timeout.
+            args.c = 'rpicam-still -n -t 1000 -o arducam-test.jpg --width 1920 --height 1080'
+        else:
+            print("[INFO] Bullseye or other OS detected. Defaulting to 'libcamera-still'.")
+            args.c = 'libcamera-still -n -t 1000 -o arducam-test.jpg --width 1920 --height 1080'
+    
     app = args.c.split(" ")[0]
+
+    list_cameras_flag = '--list' if os_codename == 'bookworm' and app == 'rpicam-still' else '--list-cameras'
+
 
     reports = []
     with open(args.o, 'wt') as file:
         title = Report('libcamera-apps Bug Report', file)
-        title.add_str(
-            f'Date: {datetime.now().strftime("%d-%m-%Y (%H:%M:%S)")}')
+        title.add_str(f'Date: {datetime.now().strftime("%d-%m-%Y (%H:%M:%S)")}')
         title.add_str(f'Command: {" ".join(sys.argv)}\n')
         reports.append(title)
 
@@ -117,7 +150,6 @@ if __name__ == '__main__':
         config.add_cmd('cat /boot/firmware/config.txt')
         config.add_cmd('ls /boot/overlays/* | grep arducam')
         config.add_cmd('ls /boot/overlays/* | grep imx')
-#         config.add_cmd('ls /boot/overlays/* | grep ov')
         config.add_cmd('ls /lib/modules/$(uname -r)/kernel/drivers/media/i2c')
         config.add_cmd('i2cdetect -y -r 10')
         reports.append(config)
@@ -126,23 +158,18 @@ if __name__ == '__main__':
         mem.add_cmd('cat /proc/meminfo | grep Cma')
         reports.append(mem)
 
-        # Get the camera list with the same program specified in the run command
         cam = Report('Cameras', file)
-        cam.add_cmd(f'{app} --list-cameras')
+        cam.add_cmd(f'{app} {list_cameras_flag}')
         reports.append(cam)
 
-        # Get the version with the same program specified in the run command
         ver = Report('Versions', file)
         ver.add_cmd('uname -a')
         ver.add_cmd('cat /etc/os-release')
         reports.append(ver)
 
-
-        # Run the actual application before executing the reports!
         if args.c:
+            print(f"--- Running camera command with an {args.t}-second timeout ---")
             cmd_out = run_prog(args.c, args.t)
-
-            # Report for the command output
             cmd = Report(args.c, file)
             cmd.add_str(cmd_out)
             reports.append(cmd)
