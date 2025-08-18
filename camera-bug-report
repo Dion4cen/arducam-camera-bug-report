@@ -1,0 +1,148 @@
+#!/bin/bash
+
+#================================================================
+#    Arducam Bug Report Script (Optimized for Bullseye & Bookworm)
+#    Version 2: Added --nopreview flag for silent capture
+#================================================================
+
+# Color defines
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Helper functions for colored output
+_msg() { echo -e "${BLUE}[INFO]${NC} $1"; }
+_msg_n() { echo -en "${BLUE}[INFO]${NC} $1"; }
+_title() { echo -e "${GREEN}====== $1 ======${NC}"; }
+_item() { echo -e "  ${YELLOW}-$1${NC}"; }
+_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+# Check for root permissions
+if [ "$(id -u)" -ne 0 ]; then
+    _error "This script must be run as root. Please use sudo."
+    exit 1
+fi
+
+# --- OS Detection and Command Selection ---
+OS_CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d'=' -f2)
+
+# Declare variables for camera commands
+CAM_DETECT_CMD=""
+CAM_PREVIEW_CMD=""
+
+_title "System & Camera Command Detection"
+
+if [ "$OS_CODENAME" == "bookworm" ]; then
+    _item "Detected OS: Bookworm"
+    CAM_DETECT_CMD="rpicam-still --list"
+    CAM_PREVIEW_CMD="rpicam-still"
+elif [ "$OS_CODENAME" == "bullseye" ]; then
+    _item "Detected OS: Bullseye"
+    CAM_DETECT_CMD="libcamera-still --list-cameras"
+    CAM_PREVIEW_CMD="libcamera-still"
+else
+    _msg "[Warning] Could not determine OS version or it's neither Bullseye nor Bookworm. Falling back to libcamera."
+    _item "OS Codename found: $OS_CODENAME"
+    CAM_DETECT_CMD="libcamera-still --list-cameras"
+    CAM_PREVIEW_CMD="libcamera-still"
+fi
+
+_item "Using command for camera detection: ${GREEN}$CAM_DETECT_CMD${NC}"
+_item "Using command for camera preview: ${GREEN}$CAM_PREVIEW_CMD${NC}"
+# --- End of Detection Block ---
+
+
+# Create a directory for the report
+REPORT_DIR="arducam-bug-report-$(date +%Y-%m-%d_%H-%M-%S)"
+mkdir -p "$REPORT_DIR"
+_msg "Report will be saved in: ${GREEN}$REPORT_DIR${NC}"
+LOG_FILE="$REPORT_DIR/report.log"
+# The filename "test.jpg" is determined here, matching your request
+JPG_FILE="$REPORT_DIR/test.jpg"
+
+# Redirect all stdout and stderr to the log file from this point
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+# Main functions
+check_camera() {
+    _title "Camera Detection"
+    if command -v $CAM_PREVIEW_CMD &> /dev/null; then
+        _msg "Running: $CAM_DETECT_CMD"
+        $CAM_DETECT_CMD
+    else
+        _error "'$CAM_PREVIEW_CMD' command not found. libcamera/rpicam stack may not be installed."
+    fi
+}
+
+camera_test() {
+    _title "Camera Preview Test (No-Preview Mode)"
+    _msg "Attempting to capture a test image using '$CAM_PREVIEW_CMD'..."
+    
+    # <<< MODIFICATION START >>>
+    # Added the '-n' flag to the command for no preview.
+    # The timeout is 5000ms (5s) as requested.
+    local CAPTURE_CMD="$CAM_PREVIEW_CMD -t 5000 -o \"$JPG_FILE\" -n"
+    _msg "Command: $CAPTURE_CMD"
+    # Using 'eval' to correctly handle the command string with quotes
+    timeout 15s eval "$CAPTURE_CMD"
+    # <<< MODIFICATION END >>>
+    
+    if [ -f "$JPG_FILE" ] && [ -s "$JPG_FILE" ]; then
+        _msg "${GREEN}Success!${NC} Test image saved to $JPG_FILE"
+    else
+        _error "Failed to capture test image. Please check camera connection and configuration."
+    fi
+}
+
+check_os_info() {
+    _title "Operating System Information"
+    _item "Kernel Version:"
+    uname -a
+    _item "OS Release Information:"
+    cat /etc/os-release
+    _item "RPi Model:"
+    cat /proc/device-tree/model
+}
+
+check_boot_config() {
+    _title "/boot/config.txt"
+    # Unified path for config.txt, Raspbian uses firmware subdirectory now
+    local config_path="/boot/firmware/config.txt"
+    if [ ! -f "$config_path" ]; then
+        # Fallback for older systems
+        config_path="/boot/config.txt"
+    fi
+
+    if [ -f "$config_path" ]; then
+        _msg "Displaying content of: $config_path"
+        cat "$config_path"
+    else
+        _error "/boot/firmware/config.txt and /boot/config.txt not found."
+    fi
+}
+
+check_dmesg() {
+    _title "dmesg logs"
+    dmesg
+}
+
+# Main execution flow
+main() {
+    _title "Arducam Bug Report Generation"
+    echo "Report generated on: $(date)"
+    
+    check_os_info
+    check_boot_config
+    check_camera
+    camera_test
+    check_dmesg
+    
+    _title "Script Finished"
+    _msg "All logs and test images have been saved to the '${GREEN}$REPORT_DIR${NC}' directory."
+    _msg "Please compress this directory and send it to Arducam support."
+}
+
+# Run the main function
+main
