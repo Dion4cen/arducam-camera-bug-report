@@ -1,8 +1,7 @@
 #!/bin/bash
 
 #================================================================
-#    Arducam Bug Report Script (Optimized for Bullseye & Bookworm)
-#    Version 2: Added --nopreview flag for silent capture
+#    Arducam Bug Report Script
 #================================================================
 
 # Color defines
