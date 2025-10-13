@@ -4,8 +4,8 @@
 # Copyright (c) 2023 naushir.
 #
 # Arducam libcamera-apps bug report generator.
-# MODIFIED: 
-# - To support both Bullseye (libcamera-still) and Bookworm (rpicam-still)
+# MODIFIED:
+# - To support Bullseye (libcamera-still), Bookworm (rpicam-still), and Trixie (rpicam-still).
 # - To add a default 8-second timeout to the camera command to prevent hangs.
 #
 
@@ -20,13 +20,14 @@ from datetime import datetime
 def get_os_codename():
     """
     Parses /etc/os-release to find the VERSION_CODENAME.
-    This is the most reliable way to distinguish Bullseye from Bookworm.
+    This is the most reliable way to distinguish Bullseye, Bookworm, and Trixie.
     """
     try:
         with open('/etc/os-release', 'r') as f:
             for line in f:
                 if line.startswith('VERSION_CODENAME='):
-                    return line.strip().split('=')[1]
+                    # Return the codename, stripped of potential quotes
+                    return line.strip().split('=')[1].strip('"')
     except FileNotFoundError:
         print("Warning: /etc/os-release not found. Falling back to Bullseye defaults.", file=sys.stderr)
         return 'bullseye'
@@ -95,7 +96,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='libcamera-apps Bug Report Generator')
     parser.add_argument('-o', help='Report filename',
                         type=str, default='arducam-bug-report.txt')
-    
+
     # --- (START) Arducam Optimization: Set default timeout ---
     # Changed default from 0 to 8.0 to prevent camera hangs.
     parser.add_argument('-t', help='Timeout (seconds) for the camera command. The script will terminate '
@@ -105,23 +106,27 @@ if __name__ == '__main__':
 
     parser.add_argument('-c', help='Command to run, e.g., -c "libcamera-still -t 5000 -n -o arducam-test.jpg"',
                         type=str, default=None)
-    
+
     args = parser.parse_args()
 
     os_codename = get_os_codename()
 
     if args.c is None:
-        if os_codename == 'bookworm':
-            print("[INFO] Bookworm OS detected. Defaulting to 'rpicam-still'.")
+        # --- (START) Trixie OS Support Added ---
+        if os_codename in ['bookworm', 'trixie']:
+            print(f"[INFO] {os_codename.capitalize()} OS detected. Defaulting to 'rpicam-still'.")
             # Note: The command's own timeout (-t 1000) is separate from the script's watchdog timeout.
             args.c = 'rpicam-still -n -t 1000 -o arducam-test.jpg --width 1920 --height 1080'
+        # --- (END) Trixie OS Support ---
         else:
             print("[INFO] Bullseye or other OS detected. Defaulting to 'libcamera-still'.")
             args.c = 'libcamera-still -n -t 1000 -o arducam-test.jpg --width 1920 --height 1080'
-    
+
     app = args.c.split(" ")[0]
 
-    list_cameras_flag = '--list' if os_codename == 'bookworm' and app == 'rpicam-still' else '--list-cameras'
+    # --- (START) Trixie OS Support Added ---
+    list_cameras_flag = '--list' if os_codename in ['bookworm', 'trixie'] and app.startswith('rpicam-') else '--list-cameras'
+    # --- (END) Trixie OS Support ---
 
 
     reports = []
@@ -146,8 +151,9 @@ if __name__ == '__main__':
         reports.append(camera)
 
         config = Report('Configuration', file)
-        config.add_cmd('cat /boot/config.txt')
-        config.add_cmd('cat /boot/firmware/config.txt')
+        # Modified to handle both potential config file locations
+        config.add_cmd('if [ -f /boot/config.txt ]; then cat /boot/config.txt; else echo "/boot/config.txt not found."; fi')
+        config.add_cmd('if [ -f /boot/firmware/config.txt ]; then cat /boot/firmware/config.txt; else echo "/boot/firmware/config.txt not found."; fi')
         config.add_cmd('ls /boot/overlays/* | grep arducam')
         config.add_cmd('ls /boot/overlays/* | grep imx')
         config.add_cmd('ls /lib/modules/$(uname -r)/kernel/drivers/media/i2c')
@@ -168,9 +174,9 @@ if __name__ == '__main__':
         reports.append(ver)
 
         if args.c:
-            print(f"--- Running camera command with an {args.t}-second timeout ---")
+            print(f"--- Running camera command with a {args.t}-second timeout ---")
             cmd_out = run_prog(args.c, args.t)
-            cmd = Report(args.c, file)
+            cmd = Report(f'Command Output: {args.c}', file)
             cmd.add_str(cmd_out)
             reports.append(cmd)
 
@@ -179,11 +185,11 @@ if __name__ == '__main__':
         logs.add_cmd('dmesg | grep arducam')
         logs.add_cmd('dmesg | grep imx')
         logs.add_cmd('dmesg | grep ov9281')
-        logs.add_cmd('dmesg')
+        logs.add_cmd('dmesg | tail -n 100') # Showing last 100 lines of dmesg is often more useful than the whole log
         reports.append(logs)
-        
+
         for r in reports:
             r.exec()
 
         print(f'\nBug report generated to {args.o}')
-        print('Please upload this file when you contact support@arducom.com')
+        print('Please upload this file when you contact support@arducam.com')
