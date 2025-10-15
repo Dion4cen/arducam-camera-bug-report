@@ -16,7 +16,6 @@ import sys
 import time
 from datetime import datetime
 
-# --- Arducam Optimization: OS Detection ---
 def get_os_codename():
     """
     Parses /etc/os-release to find the VERSION_CODENAME.
@@ -27,7 +26,7 @@ def get_os_codename():
             for line in f:
                 if line.startswith('VERSION_CODENAME='):
                     # Return the codename, stripped of potential quotes
-                    return line.strip().split('=')[1].strip('"')
+                    return line.strip().split('=')[1].strip('\"')
     except FileNotFoundError:
         print("Warning: /etc/os-release not found. Falling back to Bullseye defaults.", file=sys.stderr)
         return 'bullseye'
@@ -57,7 +56,7 @@ class Report:
         self._strs.append(s)
 
     def exec(self):
-        print(f'{"-"*80}\n{self._id}\n{"-"*80}', file=self._file)
+        print(f'{"-"*80}\\n{self._id}\\n{"-"*80}', file=self._file)
         for c in self._cmds:
             self.__run_cmd(c)
         for s in self._strs:
@@ -82,12 +81,12 @@ def run_prog(cmd, t):
             if (t != 0) and (time.time() - start > t):
                 p.kill()
                 out = out + p.communicate()[0].splitlines(keepends=True)
-                out.append('\nError: ***** TIMEOUT after ' + str(t) + ' seconds *****\n')
+                out.append('\\nError: ***** TIMEOUT after ' + str(t) + ' seconds *****\\n')
                 break
     except KeyboardInterrupt:
         p.kill()
         out = out + p.communicate()[0].splitlines(keepends=True)
-        out.append('\nError: ***** INTERRUPT *****\n')
+        out.append('\\nError: ***** INTERRUPT *****\\n')
     p.wait()
     return ''.join(out)
 
@@ -100,7 +99,7 @@ if __name__ == '__main__':
     # --- (START) Arducam Optimization: Set default timeout ---
     # Changed default from 0 to 8.0 to prevent camera hangs.
     parser.add_argument('-t', help='Timeout (seconds) for the camera command. The script will terminate '
-                                    'the command if it runs longer than this. Default is 8 seconds. Set to 0 to disable.',
+                        'the command if it runs longer than this. Default is 8 seconds. Set to 0 to disable.',
                         type=float, default=8.0)
     # --- (END) Arducam Optimization ---
 
@@ -133,7 +132,7 @@ if __name__ == '__main__':
     with open(args.o, 'wt') as file:
         title = Report('libcamera-apps Bug Report', file)
         title.add_str(f'Date: {datetime.now().strftime("%d-%m-%Y (%H:%M:%S)")}')
-        title.add_str(f'Command: {" ".join(sys.argv)}\n')
+        title.add_str(f'Command: {" ".join(sys.argv)}\\n')
         reports.append(title)
 
         hwinfo = Report('Hardware information', file)
@@ -191,5 +190,5 @@ if __name__ == '__main__':
         for r in reports:
             r.exec()
 
-        print(f'\nBug report generated to {args.o}')
+        print(f'\\nBug report generated to {args.o}')
         print('Please upload this file when you contact support@arducam.com')
