@@ -7,6 +7,7 @@
 # MODIFIED:
 # - To support Bullseye (libcamera-still), Bookworm (rpicam-still), and Trixie (rpicam-still).
 # - To add a default 8-second timeout to the camera command to prevent hangs.
+# - To fix the OS detection function to be more robust.
 #
 
 import argparse
@@ -19,18 +20,32 @@ from datetime import datetime
 def get_os_codename():
     """
     Parses /etc/os-release to find the VERSION_CODENAME.
-    This is the most reliable way to distinguish Bullseye, Bookworm, and Trixie.
+    This function is more robust and handles variations in the file format.
     """
     try:
-        with open('/etc/os-release', 'r') as f:
+        os_info = {}
+        with open('/etc/os-release', 'r', encoding='utf-8') as f:
             for line in f:
-                if line.startswith('VERSION_CODENAME='):
-                    # Return the codename, stripped of potential quotes
-                    return line.strip().split('=')[1].strip('\"')
+                line = line.strip()
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    # Remove potential quotes from the value, e.g., "trixie" -> trixie
+                    os_info[key] = value.strip('"\'')
+        
+        codename = os_info.get('VERSION_CODENAME')
+        if codename:
+            return codename
+        else:
+            # Fallback if VERSION_CODENAME is not found
+            print("Warning: VERSION_CODENAME not found in /etc/os-release. Falling back to Bullseye defaults.", file=sys.stderr)
+            return 'bullseye'
+
     except FileNotFoundError:
         print("Warning: /etc/os-release not found. Falling back to Bullseye defaults.", file=sys.stderr)
         return 'bullseye'
-    return 'bullseye' # Default fallback
+    except Exception as e:
+        print(f"Warning: An error occurred while reading /etc/os-release: {e}. Falling back to Bullseye defaults.", file=sys.stderr)
+        return 'bullseye'
 
 
 class Report:
@@ -64,11 +79,12 @@ class Report:
 
 
 def run_prog(cmd, t):
-    cmd = cmd.split(' ')
+    cmd_list = cmd.split(' ')
     out = []
     try:
         start = time.time()
-        p = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE,
+        # Using cmd_list to avoid shell=True complexities unless necessary
+        p = subprocess.Popen(cmd_list, text=True, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, errors='ignore')
         poll = select.poll()
         poll.register(p.stdout, select.POLLIN)
@@ -77,16 +93,29 @@ def run_prog(cmd, t):
                 line = p.stdout.readline()
                 print(line, end='', flush=True)
                 out.append(line)
-            # This is the timeout logic, it will now trigger by default
             if (t != 0) and (time.time() - start > t):
                 p.kill()
-                out = out + p.communicate()[0].splitlines(keepends=True)
-                out.append('\\nError: ***** TIMEOUT after ' + str(t) + ' seconds *****\\n')
+                # Use communicate to get any remaining output
+                remaining_output = p.communicate()[0]
+                if remaining_output:
+                     print(remaining_output, end='', flush=True)
+                     out.append(remaining_output)
+                timeout_msg = f'\\nError: ***** TIMEOUT after {t} seconds *****\\n'
+                print(timeout_msg)
+                out.append(timeout_msg)
                 break
+        # One last read after the process finished
+        remaining_output = p.communicate()[0]
+        if remaining_output:
+             print(remaining_output, end='', flush=True)
+             out.append(remaining_output)
     except KeyboardInterrupt:
         p.kill()
-        out = out + p.communicate()[0].splitlines(keepends=True)
         out.append('\\nError: ***** INTERRUPT *****\\n')
+    except FileNotFoundError:
+        err_msg = f"\\nError: ***** COMMAND NOT FOUND: '{cmd_list[0]}' *****\\n"
+        print(err_msg, file=sys.stderr)
+        out.append(err_msg)
     p.wait()
     return ''.join(out)
 
@@ -95,14 +124,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='libcamera-apps Bug Report Generator')
     parser.add_argument('-o', help='Report filename',
                         type=str, default='arducam-bug-report.txt')
-
-    # --- (START) Arducam Optimization: Set default timeout ---
-    # Changed default from 0 to 8.0 to prevent camera hangs.
-    parser.add_argument('-t', help='Timeout (seconds) for the camera command. The script will terminate '
-                        'the command if it runs longer than this. Default is 8 seconds. Set to 0 to disable.',
+    parser.add_argument('-t', help='Timeout (seconds) for the camera command. Default is 8 seconds. Set to 0 to disable.',
                         type=float, default=8.0)
-    # --- (END) Arducam Optimization ---
-
     parser.add_argument('-c', help='Command to run, e.g., -c "libcamera-still -t 5000 -n -o arducam-test.jpg"',
                         type=str, default=None)
 
@@ -111,21 +134,16 @@ if __name__ == '__main__':
     os_codename = get_os_codename()
 
     if args.c is None:
-        # --- (START) Trixie OS Support Added ---
         if os_codename in ['bookworm', 'trixie']:
             print(f"[INFO] {os_codename.capitalize()} OS detected. Defaulting to 'rpicam-still'.")
-            # Note: The command's own timeout (-t 1000) is separate from the script's watchdog timeout.
             args.c = 'rpicam-still -n -t 1000 -o arducam-test.jpg --width 1920 --height 1080'
-        # --- (END) Trixie OS Support ---
         else:
             print("[INFO] Bullseye or other OS detected. Defaulting to 'libcamera-still'.")
             args.c = 'libcamera-still -n -t 1000 -o arducam-test.jpg --width 1920 --height 1080'
 
     app = args.c.split(" ")[0]
 
-    # --- (START) Trixie OS Support Added ---
     list_cameras_flag = '--list' if os_codename in ['bookworm', 'trixie'] and app.startswith('rpicam-') else '--list-cameras'
-    # --- (END) Trixie OS Support ---
 
 
     reports = []
@@ -150,13 +168,12 @@ if __name__ == '__main__':
         reports.append(camera)
 
         config = Report('Configuration', file)
-        # Modified to handle both potential config file locations
         config.add_cmd('if [ -f /boot/config.txt ]; then cat /boot/config.txt; else echo "/boot/config.txt not found."; fi')
         config.add_cmd('if [ -f /boot/firmware/config.txt ]; then cat /boot/firmware/config.txt; else echo "/boot/firmware/config.txt not found."; fi')
         config.add_cmd('ls /boot/overlays/* | grep arducam')
         config.add_cmd('ls /boot/overlays/* | grep imx')
         config.add_cmd('ls /lib/modules/$(uname -r)/kernel/drivers/media/i2c')
-        config.add_cmd('i2cdetect -y -r 10')
+        config.add_cmd('i2cdetect -y -r 10 || i2cdetect -y -r 0') # Try bus 0 if 10 fails
         reports.append(config)
 
         mem = Report('Memory', file)
@@ -184,7 +201,7 @@ if __name__ == '__main__':
         logs.add_cmd('dmesg | grep arducam')
         logs.add_cmd('dmesg | grep imx')
         logs.add_cmd('dmesg | grep ov9281')
-        logs.add_cmd('dmesg | tail -n 100') # Showing last 100 lines of dmesg is often more useful than the whole log
+        logs.add_cmd('dmesg | tail -n 100')
         reports.append(logs)
 
         for r in reports:
